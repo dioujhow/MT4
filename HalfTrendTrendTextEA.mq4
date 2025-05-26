@@ -1,63 +1,51 @@
 //+------------------------------------------------------------------+
-//|                                                SignalEA.mq4      |
-//|                      => Versão 5.0 Completa (700+ linhas)        |
-//|                      => Exclusivo PipFinite Breakout EDGE        |
+//|                                                SignalEA_Martingale.mq4 |
+//|           EA de Trading baseado no PipFinite Breakout EDGE        |
+//|           Apenas uma entrada principal com Martingale             |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "5.0"
-#property description "EA de Trading baseado no PipFinite Breakout EDGE"
-#property description "Versão completa com gerenciamento de risco avançado"
-#property description "e sistema de reentradas simplificado"
+#property version   "6.0"
+#property description "EA de Trading com Martingale - Uma entrada por vez"
 
 #define BUF_BUY_SIGNAL  0
 #define BUF_SELL_SIGNAL 1
 
 //--- Parâmetros de Entrada
-input group "Configurações Básicas"
-input double Lots = 0.01;                  // Tamanho do lote
+input double Lots = 0.01;                  // Lote inicial
 input int Slippage = 10;                   // Slippage permitido (pontos)
 input int MagicNumber = 12345;             // Número mágico para ordens
 
-input group "Configurações de Stop/Take"
 input int FixedStopLossPoints = 500;       // Stop Loss fixo (pontos)
 input int FixedTakeProfitPoints = 1000;    // Take Profit fixo (pontos)
 input int TrailingStart = 100;             // Trailing Start (pontos)
 input int TrailingStep = 50;               // Trailing Step (pontos)
 input int TrailingStop = 50;               // Trailing Stop (pontos)
 
-input group "Configurações de Sinais"
-input bool ContinuarOrdensTendencia = true;// Continuar ordens na tendência?
-input int MemoriaSinalCandles = 6;         // Memória do sinal (candles)
-
-input group "Controle de Horário"
 input string HorarioInicio = "09:00";      // Horário de início (HH:MM)
 input string HorarioFim = "17:00";         // Horário de término (HH:MM)
 
-input group "Gerenciamento de Risco"
-input bool UsarMartingale = true;          // Usar sistema Martingale?
-input int MultiplicadorMartingale = 2;     // Multiplicador de lote (padrão 2x)
-input int MaximoMartingale = 5;            // Máximo de martingales consecutivos
 input int SpreadMaximo = 30;               // Spread máximo permitido
 input double LucroMaximoDiario = 500.0;    // Lucro diário máximo (USD)
 input double PerdaMaximaDiaria = 300.0;    // Perda diária máxima (USD)
-input bool PermitirReentradas = true;      // Permitir reentradas?
 
-input group "Configurações de Debug"
 input bool EnableDebugLogs = true;         // Ativar logs detalhados?
 
+//--- Martingale
+input bool UsarMartingale = true;          // Ativar Martingale?
+input double MultiplicadorMartingale = 2.0;// Multiplicador Martingale
+input int MaxMartingale = 5;               // Máximo de níveis Martingale
+
 //--- Variáveis Globais
-int ultimoSinalValido = 0;
-datetime ultimoSinalTime = 0;
-bool tradingHabilitado = true;
+double loteAtual = 0;
+int nivelMartingale = 0;
+double ultimoLucro = 0;
+int ultimoTipoOrdemFechada = 0;
+datetime ultimoFechamentoTime = 0;
+
 double lucroDiarioAtual = 0;
 datetime ultimoCalculoDiario = 0;
-datetime ultimoFechamentoTime = 0;
-int ultimoTipoOrdemFechada = 0;
-int martingaleCount = 0;                   // Contador de martingales
-double lastOrderLotSize = Lots;            // Tamanho do último lote usado
-const datetime DATA_EXPIRACAO = D'2025.12.31 23:00';
+const datetime DATA_EXPIRACAO = D'2025.06.30 23:00';
 
-//--- Configurações do Painel
 color corTexto = clrWhite;
 color corPositivo = clrLime;
 color corNegativo = clrRed;
@@ -75,23 +63,15 @@ int OnInit()
    CriarPainelDireito();
    ultimoCalculoDiario = iTime(Symbol(), PERIOD_D1, 0);
    CalcularEstatisticasDiarias();
-   
+   loteAtual = Lots;
+   nivelMartingale = 0;
    if(EnableDebugLogs) 
    {
       Print("=========================================");
-      Print("SignalEA INICIALIZADO - Versão 5.0");
-      Print("Par: ", Symbol(), " | Timeframe: ", TimeframeToString(Period()));
-      Print("Configurações Carregadas:");
-      Print(" - Lote: ", Lots);
-      Print(" - Stop Loss: ", FixedStopLossPoints, " pts");
-      Print(" - Take Profit: ", FixedTakeProfitPoints, " pts");
-      Print(" - Horário: ", HorarioInicio, " - ", HorarioFim);
-      Print(" - Reentradas: ", PermitirReentradas ? "LIGADO" : "DESLIGADO");
-      Print(" - Martingale: ", UsarMartingale ? "LIGADO" : "DESLIGADO");
-      Print(" - Modo Sinal: ", ContinuarOrdensTendencia ? "TENDÊNCIA" : "IMEDIATO");
+      Print("SignalEA_Martingale INICIALIZADO");
+      Print("Lote inicial: ", Lots, " | Martingale: ", UsarMartingale ? "ON" : "OFF");
       Print("=========================================");
    }
-   
    return(INIT_SUCCEEDED);
 }
 
@@ -103,30 +83,11 @@ void OnDeinit(const int reason)
    ObjectsDeleteAll(0, "Panel_");
    if(EnableDebugLogs) 
    {
-      Print("EA Finalizado - Razão: ", DeinitReasonToString(reason));
+      Print("EA Finalizado - Razão: ", reason);
       Print("=========================================");
    }
 }
 
-//+------------------------------------------------------------------+
-//| Converte motivo de desinicialização para string                  |
-//+------------------------------------------------------------------+
-string DeinitReasonToString(int reason)
-{
-   switch(reason)
-   {
-      case REASON_ACCOUNT:    return "Conta alterada";
-      case REASON_CHARTCHANGE:return "Gráfico alterado";
-      case REASON_CHARTCLOSE: return "Gráfico fechado";
-      case REASON_CLOSE:      return "Terminal fechado";
-      case REASON_INITFAILED: return "Inicialização falhou";
-      case REASON_PARAMETERS: return "Parâmetros alterados";
-      case REASON_RECOMPILE:  return "Recompilação";
-      case REASON_REMOVE:     return "EA removido";
-      case REASON_TEMPLATE:   return "Template alterado";
-      default:                return "Razão desconhecida";
-   }
-}
 
 //+------------------------------------------------------------------+
 //| Cria o painel informativo no canto superior direito              |
@@ -137,7 +98,7 @@ void CriarPainelDireito()
    int y_pos = 20;
    int linhaAltura = 18;
    
-   CriarTexto("Panel_Title", "SignalEA v5.0", x_pos, y_pos, corTexto, tamanhoFonte+2, true);
+   CriarTexto("Panel_Title", "SignalEA Martingale", x_pos, y_pos, corTexto, tamanhoFonte+2, true);
    y_pos += linhaAltura + 5;
    
    CriarTexto("Panel_Symbol", StringFormat("%s | %s", Symbol(), TimeframeToString(Period())), x_pos, y_pos, corTexto, tamanhoFonte);
@@ -154,51 +115,38 @@ void CriarPainelDireito()
    y_pos += linhaAltura;
    CriarTexto("Panel_Lucro", "Lucro Hoje: $0.00", x_pos, y_pos, corTexto, tamanhoFonte);
    y_pos += linhaAltura;
-   CriarTexto("Panel_Reentradas", "Reentradas: " + (PermitirReentradas ? "LIGADO" : "DESLIGADO"), 
-              x_pos, y_pos, PermitirReentradas ? corPositivo : corNegativo, tamanhoFonte);
+   CriarTexto("Panel_Martingale", "Martingale: " + (UsarMartingale ? "ON" : "OFF"), x_pos, y_pos, UsarMartingale ? corPositivo : corNegativo, tamanhoFonte);
    y_pos += linhaAltura;
-   CriarTexto("Panel_ModoSinal", "Modo Sinal: " + (ContinuarOrdensTendencia ? "TENDÊNCIA" : "IMEDIATO"), 
-              x_pos, y_pos, ContinuarOrdensTendencia ? corPositivo : corAlerta, tamanhoFonte);
-   y_pos += linhaAltura;
-   CriarTexto("Panel_Martingale", StringFormat("Martingale: %s (%d/%d)", 
-              UsarMartingale ? "ON" : "OFF", martingaleCount, MaximoMartingale), 
-              x_pos, y_pos, UsarMartingale ? corPositivo : corNegativo, tamanhoFonte);
-   y_pos += linhaAltura;
-   CriarTexto("Panel_LoteAtual", "Próximo Lote: " + DoubleToString(UsarMartingale ? lastOrderLotSize : Lots, 2), 
-              x_pos, y_pos, corTexto, tamanhoFonte);
+   CriarTexto("Panel_Nivel", "Nível Martingale: 0", x_pos, y_pos, corTexto, tamanhoFonte);
 }
+
 //+------------------------------------------------------------------+
 //| Atualiza o painel informativo                                   |
 //+------------------------------------------------------------------+
 void AtualizarPainel()
 {
-   tradingHabilitado = VerificarCondicoesTrading();
-   
-   color corStatus = tradingHabilitado ? corPositivo : corNegativo;
-   AtualizarTextoPainel("Panel_Status", "Status: " + (tradingHabilitado ? "ATIVO" : "BLOQUEADO"), corStatus);
-   
+   color corStatus = (EAExpirado() ? corNegativo : corPositivo);
+   AtualizarTextoPainel("Panel_Status", "Status: " + (EAExpirado() ? "EXPIRADO" : "ATIVO"), corStatus);
+
    int sinalAtual = GetPipFiniteSignal();
    color corSignal = (sinalAtual == 1) ? corPositivo : (sinalAtual == -1) ? corNegativo : corNeutro;
    AtualizarTextoPainel("Panel_Signal", "Sinal: " + (sinalAtual == 1 ? "COMPRA" : sinalAtual == -1 ? "VENDA" : "NENHUM"), corSignal);
-   
+
    int ordemAberta = CurrentOpenOrderType();
    color corOrder = (ordemAberta == 1) ? corPositivo : (ordemAberta == -1) ? corNegativo : corNeutro;
    AtualizarTextoPainel("Panel_Order", "Ordem: " + (ordemAberta == 1 ? "COMPRA" : ordemAberta == -1 ? "VENDA" : "NENHUMA"), corOrder);
-   
+
    int spreadAtual = MarketInfo(Symbol(), MODE_SPREAD);
    color corSpread = (spreadAtual <= SpreadMaximo) ? corPositivo : corNegativo;
    AtualizarTextoPainel("Panel_Spread", "Spread: " + IntegerToString(spreadAtual), corSpread);
-   
+
    color corLucro = (lucroDiarioAtual >= 0) ? corPositivo : corNegativo;
    if(lucroDiarioAtual >= LucroMaximoDiario) corLucro = corAlerta;
    if(lucroDiarioAtual <= -PerdaMaximaDiaria) corLucro = corAlerta;
    AtualizarTextoPainel("Panel_Lucro", "Lucro Hoje: $" + DoubleToString(lucroDiarioAtual, 2), corLucro);
-   
-   AtualizarTextoPainel("Panel_Martingale", StringFormat("Martingale: %s (%d/%d)", 
-                       UsarMartingale ? "ON" : "OFF", martingaleCount, MaximoMartingale), 
-                       UsarMartingale ? corPositivo : corNegativo);
-   AtualizarTextoPainel("Panel_LoteAtual", "Próximo Lote: " + DoubleToString(UsarMartingale ? lastOrderLotSize : Lots, 2), 
-                       corTexto);
+
+   AtualizarTextoPainel("Panel_Martingale", "Martingale: " + (UsarMartingale ? "ON" : "OFF"), UsarMartingale ? corPositivo : corNegativo);
+   AtualizarTextoPainel("Panel_Nivel", "Nível Martingale: " + IntegerToString(nivelMartingale), corTexto);
 }
 
 //+------------------------------------------------------------------+
@@ -216,6 +164,8 @@ void CriarTexto(string nome, string texto, int x, int y, color cor, int tamanho,
    ObjectSetString(0, nome, OBJPROP_FONT, nomeFonte);
    if(negrito) ObjectSetInteger(0, nome, OBJPROP_FONTSIZE, tamanho+1);
 }
+
+
 
 //+------------------------------------------------------------------+
 //| Atualiza um texto no painel                                     |
@@ -322,6 +272,7 @@ bool DentroDoHorario()
    int minutoFim = (int)StringToInteger(StringSubstr(HorarioFim, 3, 2));
    datetime fim = hoje + (horaFim * 3600) + (minutoFim * 60);
 
+   // Suporte para horários que cruzam a meia-noite
    if(fim < inicio)
    {
       if(agora >= inicio || agora <= fim)
@@ -359,71 +310,24 @@ void CalcularEstatisticasDiarias()
    
    if(EnableDebugLogs) Print("Estatísticas diárias calculadas. Lucro: ", lucroDiarioAtual);
 }
+
 //+------------------------------------------------------------------+
 //| Obtém sinal do indicador PipFinite                              |
 //+------------------------------------------------------------------+
 int GetPipFiniteSignal()
 {
-   if(!tradingHabilitado) 
-   {
-      if(EnableDebugLogs) Print("Trading desabilitado - ignorando sinais");
-      return 0;
-   }
-   
    double buy = iCustom(Symbol(), Period(), "PipFinite Breakout EDGE_fix", BUF_BUY_SIGNAL, 1);
    double sell = iCustom(Symbol(), Period(), "PipFinite Breakout EDGE_fix", BUF_SELL_SIGNAL, 1);
-   
-   if(buy != 0.0 && buy != EMPTY_VALUE)
-   {
-      if(ContinuarOrdensTendencia)
-      {
-         ultimoSinalValido = 1;
-         ultimoSinalTime = TimeCurrent();
-         if(EnableDebugLogs) Print("Sinal de COMPRA detectado e armazenado");
-      }
-      return 1;
-   }
-   
-   if(sell != 0.0 && sell != EMPTY_VALUE)
-   {
-      if(ContinuarOrdensTendencia)
-      {
-         ultimoSinalValido = -1;
-         ultimoSinalTime = TimeCurrent();
-         if(EnableDebugLogs) Print("Sinal de VENDA detectado e armazenado");
-      }
-      return -1;
-   }
 
-   if(!ContinuarOrdensTendencia) 
-   {
-      if(ultimoSinalValido != 0)
-      {
-         ultimoSinalValido = 0;
-         if(EnableDebugLogs) Print("Modo imediato - limpando sinal anterior");
-      }
-      return 0;
-   }
-   
-   int candlesPassados = (int)((TimeCurrent() - ultimoSinalTime) / PeriodSeconds());
-   
-   if(candlesPassados < MemoriaSinalCandles && ultimoSinalValido != 0)
-   {
-      if(EnableDebugLogs) Print("Usando sinal armazenado (", ultimoSinalValido, ") de ", candlesPassados, " candles atrás");
-      return ultimoSinalValido;
-   }
-   
-   if(candlesPassados >= MemoriaSinalCandles && ultimoSinalValido != 0)
-   {
-      ultimoSinalValido = 0;
-      if(EnableDebugLogs) Print("Sinal armazenado expirado após ", MemoriaSinalCandles, " candles");
-   }
-   
+   if(buy != 0.0 && buy != EMPTY_VALUE)
+      return 1;
+   if(sell != 0.0 && sell != EMPTY_VALUE)
+      return -1;
    return 0;
 }
 
 //+------------------------------------------------------------------+
-//| Verifica ordens abertas do EA                                   |
+//| Verifica se há ordem aberta do EA                               |
 //+------------------------------------------------------------------+
 int CurrentOpenOrderType()
 {
@@ -447,74 +351,29 @@ int CurrentOpenOrderType()
 bool CloseAllOrders()
 {
    bool result = true;
-   int tentativas = 0;
-   int maxTentativas = 3;
-
-   while(tentativas < maxTentativas)
+   for(int i = OrdersTotal()-1; i >= 0; i--)
    {
-      bool todasFechadas = true;
-
-      for(int i = OrdersTotal()-1; i >= 0; i--)
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
       {
-         if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber)
          {
-            if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber)
+            double price = (OrderType() == OP_BUY) ? Bid : Ask;
+            if(!OrderClose(OrderTicket(), OrderLots(), price, Slippage, clrNONE))
+            {
+               Print("Erro ao fechar ordem #", OrderTicket(), " | Erro: ", GetLastError());
+               result = false;
+            }
+            else
             {
                ultimoTipoOrdemFechada = OrderType();
-               double price = OrderClosePrice();
-
-               if(!OrderClose(OrderTicket(), OrderLots(), price, Slippage, clrNONE))
-               {
-                  Print("Tentativa ", tentativas+1, ": Erro ao fechar ordem #", OrderTicket(), " | Erro: ", GetLastError());
-                  todasFechadas = false;
-               }
-               else
-               {
-                  ultimoFechamentoTime = TimeCurrent();
-                  if(EnableDebugLogs) Print("Ordem #", OrderTicket(), " fechada com sucesso");
-                  
-                  // Verifica se a ordem foi fechada com prejuízo
-                  if(OrderProfit() + OrderSwap() + OrderCommission() < 0)
-                  {
-                     if(UsarMartingale && martingaleCount < MaximoMartingale)
-                     {
-                        martingaleCount++;
-                        lastOrderLotSize = NormalizeDouble(OrderLots() * MultiplicadorMartingale, 2);
-                        if(EnableDebugLogs) 
-                           Print("Ordem fechada com prejuízo. Martingale aumentado para ", martingaleCount, 
-                                 " | Próximo lote: ", lastOrderLotSize);
-                     }
-                     else
-                     {
-                        martingaleCount = 0;
-                        lastOrderLotSize = Lots;
-                        if(EnableDebugLogs) 
-                           Print("Resetando martingale. Máximo atingido ou desativado");
-                     }
-                  }
-                  else
-                  {
-                     martingaleCount = 0;
-                     lastOrderLotSize = Lots;
-                     if(EnableDebugLogs) Print("Ordem fechada com lucro. Resetando martingale");
-                  }
-               }
+               ultimoFechamentoTime = TimeCurrent();
+               ultimoLucro = OrderProfit() + OrderSwap() + OrderCommission();
+               if(EnableDebugLogs) Print("Ordem #", OrderTicket(), " fechada. Lucro: ", ultimoLucro);
             }
          }
       }
-
-      if(todasFechadas)
-      {
-         if(EnableDebugLogs) Print("Todas as ordens foram fechadas após ", tentativas+1, " tentativa(s)");
-         return true;
-      }
-
-      tentativas++;
-      Sleep(1000);
    }
-
-   Print("Falha ao fechar todas as ordens após ", maxTentativas, " tentativas");
-   return false;
+   return result;
 }
 
 //+------------------------------------------------------------------+
@@ -527,12 +386,10 @@ void GerenciarTrailingStop()
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
       {
          if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
-
          int tipo = OrderType();
          if(tipo != OP_BUY && tipo != OP_SELL) continue;
 
          double profitPoints = (tipo == OP_BUY) ? (Bid - OrderOpenPrice())/Point : (OrderOpenPrice() - Ask)/Point;
-
          if(profitPoints >= TrailingStart)
          {
             double novoSL = (tipo == OP_BUY)
@@ -557,104 +414,28 @@ void GerenciarTrailingStop()
 }
 
 //+------------------------------------------------------------------+
-//| Verifica se pode abrir nova ordem                               |
-//+------------------------------------------------------------------+
-bool PodeAbrirOrdem(int tipoSinal)
-{
-   if(ultimoFechamentoTime == 0) 
-   {
-      if(EnableDebugLogs) Print("Primeira ordem do dia - permitindo");
-      return true;
-   }
-   
-   if(PermitirReentradas) 
-   {
-      if(EnableDebugLogs) Print("Reentradas permitidas - permitindo nova ordem");
-      return true;
-   }
-   
-   if((ultimoTipoOrdemFechada == OP_BUY && tipoSinal == -1) || 
-      (ultimoTipoOrdemFechada == OP_SELL && tipoSinal == 1))
-   {
-      if(EnableDebugLogs) Print("Ordem contrária à última fechada - permitindo");
-      return true;
-   }
-   
-   if(EnableDebugLogs) 
-   {
-      Print("Reentrada bloqueada:");
-      Print(" - Última ordem fechada: ", ultimoTipoOrdemFechada);
-      Print(" - Sinal atual: ", tipoSinal);
-      Print(" - Reentradas permitidas: ", PermitirReentradas ? "SIM" : "NÃO");
-   }
-   
-   return false;
-}
-//+------------------------------------------------------------------+
-//| Verifica margem disponível para o lote                           |
-//+------------------------------------------------------------------+
-bool VerificarMargem(int tipoOrdem, double lote)
-{
-   double margemRequerida = MarketInfo(Symbol(), MODE_MARGINREQUIRED) * lote;
-   double margemLivre = AccountFreeMargin();
-   
-   if(margemLivre < margemRequerida)
-   {
-      Print("Margem insuficiente. Disponível: ", margemLivre, " Requerido: ", margemRequerida);
-      return false;
-   }
-   
-   return true;
-}
-
-//+------------------------------------------------------------------+
 //| Abre ordem de compra                                            |
 //+------------------------------------------------------------------+
 bool AbrirOrdemCompra()
 {
-   if(!tradingHabilitado) 
-   {
-      if(EnableDebugLogs) Print("Trading desabilitado - ordem de COMPRA não será aberta");
-      return false;
-   }
-   
-   if(!PodeAbrirOrdem(OP_BUY))
-   {
-      if(EnableDebugLogs) Print("Condições não permitem abertura de COMPRA");
-      return false;
-   }
-   
-   double loteAtual = UsarMartingale ? lastOrderLotSize : Lots;
-   
-   if(!VerificarMargem(OP_BUY, loteAtual))
-   {
-      Print("Margem insuficiente para abrir ordem de COMPRA com lote ", loteAtual);
-      martingaleCount = 0;
-      lastOrderLotSize = Lots;
-      return false;
-   }
-   
    double sl = FixedStopLossPoints > 0 ? NormalizeDouble(Ask - FixedStopLossPoints * Point, Digits) : 0;
    double tp = FixedTakeProfitPoints > 0 ? NormalizeDouble(Ask + FixedTakeProfitPoints * Point, Digits) : 0;
-   
    int ticket = OrderSend(Symbol(), OP_BUY, loteAtual, Ask, Slippage, sl, tp, "COMPRA SignalEA", MagicNumber, 0, clrGreen);
-   
+
    if(ticket < 0) 
    {
       Print("Erro ao abrir ordem de COMPRA | Erro: ", GetLastError());
       return false;
    }
-   
    if(EnableDebugLogs) 
    {
-      Print("Ordem de COMPRA aberta com sucesso:");
+      Print("Ordem de COMPRA aberta:");
       Print(" - Ticket: ", ticket);
-      Print(" - Lote: ", loteAtual, " (Martingale ", martingaleCount, "/", MaximoMartingale, ")");
       Print(" - Preço: ", Ask);
       Print(" - SL: ", sl);
       Print(" - TP: ", tp);
+      Print(" - Lote: ", loteAtual);
    }
-   
    return true;
 }
 
@@ -663,49 +444,24 @@ bool AbrirOrdemCompra()
 //+------------------------------------------------------------------+
 bool AbrirOrdemVenda()
 {
-   if(!tradingHabilitado) 
-   {
-      if(EnableDebugLogs) Print("Trading desabilitado - ordem de VENDA não será aberta");
-      return false;
-   }
-   
-   if(!PodeAbrirOrdem(OP_SELL))
-   {
-      if(EnableDebugLogs) Print("Condições não permitem abertura de VENDA");
-      return false;
-   }
-   
-   double loteAtual = UsarMartingale ? lastOrderLotSize : Lots;
-   
-   if(!VerificarMargem(OP_SELL, loteAtual))
-   {
-      Print("Margem insuficiente para abrir ordem de VENDA com lote ", loteAtual);
-      martingaleCount = 0;
-      lastOrderLotSize = Lots;
-      return false;
-   }
-   
    double sl = FixedStopLossPoints > 0 ? NormalizeDouble(Bid + FixedStopLossPoints * Point, Digits) : 0;
    double tp = FixedTakeProfitPoints > 0 ? NormalizeDouble(Bid - FixedTakeProfitPoints * Point, Digits) : 0;
-   
    int ticket = OrderSend(Symbol(), OP_SELL, loteAtual, Bid, Slippage, sl, tp, "VENDA SignalEA", MagicNumber, 0, clrRed);
-   
+
    if(ticket < 0) 
    {
       Print("Erro ao abrir ordem de VENDA | Erro: ", GetLastError());
       return false;
    }
-   
    if(EnableDebugLogs) 
    {
-      Print("Ordem de VENDA aberta com sucesso:");
+      Print("Ordem de VENDA aberta:");
       Print(" - Ticket: ", ticket);
-      Print(" - Lote: ", loteAtual, " (Martingale ", martingaleCount, "/", MaximoMartingale, ")");
       Print(" - Preço: ", Bid);
       Print(" - SL: ", sl);
       Print(" - TP: ", tp);
+      Print(" - Lote: ", loteAtual);
    }
-   
    return true;
 }
 
@@ -716,96 +472,80 @@ void OnTick()
 {
    static datetime lastBarTime = 0;
    datetime currentBarTime = iTime(Symbol(), Period(), 0);
-   
-   static bool expirado = false;
-   if(!expirado && EAExpirado()) expirado = true;
-   if(expirado) return;
-   
+
+   // Atualiza estatísticas diárias ao virar o dia
    if(TimeCurrent() - ultimoCalculoDiario >= 86400)
    {
       CalcularEstatisticasDiarias();
       ultimoCalculoDiario = iTime(Symbol(), PERIOD_D1, 0);
    }
-   
+
    GerenciarTrailingStop();
-   
-   if(lastBarTime == currentBarTime) 
-   {
-      AtualizarPainel();
-      return;
-   }
-   lastBarTime = currentBarTime;
-   
    AtualizarPainel();
-   
+
+   // Só executa lógica principal em novo candle
+   if(lastBarTime == currentBarTime)
+      return;
+   lastBarTime = currentBarTime;
+
+   if(!VerificarCondicoesTrading())
+      return;
+
    int sinalAtual = GetPipFiniteSignal();
    int ordemAberta = CurrentOpenOrderType();
-   
-   if(ordemAberta != 0 && sinalAtual != 0 && sinalAtual != ordemAberta)
+
+   // Se não há ordem aberta e há sinal, abre ordem
+   if(ordemAberta == 0 && sinalAtual != 0)
    {
-      if(EnableDebugLogs) 
-      {
-         Print("Sinal contrário detectado:");
-         Print(" - Ordem aberta: ", ordemAberta);
-         Print(" - Sinal atual: ", sinalAtual);
-         Print("Fechando todas as ordens...");
-      }
-      
-      CloseAllOrders();
-      Sleep(1000);
-      return;
+      // Define lote conforme Martingale
+      if(UsarMartingale && nivelMartingale > 0)
+         loteAtual = Lots * MathPow(MultiplicadorMartingale, nivelMartingale);
+      else
+         loteAtual = Lots;
+
+      // Limita o nível de martingale
+      if(nivelMartingale > MaxMartingale)
+         loteAtual = Lots;
+
+      bool opened = false;
+      if(sinalAtual == 1)
+         opened = AbrirOrdemCompra();
+      else if(sinalAtual == -1)
+         opened = AbrirOrdemVenda();
+
+      if(opened && EnableDebugLogs)
+         Print("Ordem aberta com lote: ", loteAtual, " | Nível Martingale: ", nivelMartingale);
    }
-   
-   if(tradingHabilitado && ContinuarOrdensTendencia)
+
+   // Se ordem foi fechada, atualiza Martingale
+   if(ordemAberta == 0 && ultimoFechamentoTime != 0)
    {
-      bool podeAbrirOrdem = (ordemAberta == 0);
-      
-      if(podeAbrirOrdem)
+      // Se último lucro foi negativo, sobe martingale
+      if(UsarMartingale && ultimoLucro < 0)
       {
-         int sinalParaOperar = (sinalAtual != 0) ? sinalAtual : ultimoSinalValido;
-         
-         if(sinalParaOperar != 0)
-         {
-            if(DentroDoHorario())
-            {
-               if(sinalParaOperar == 1) 
-               {
-                  if(AbrirOrdemCompra() && EnableDebugLogs) 
-                     Print("Ordem de COMPRA aberta por continuidade de tendência");
-               }
-               else if(sinalParaOperar == -1) 
-               {
-                  if(AbrirOrdemVenda() && EnableDebugLogs) 
-                     Print("Ordem de VENDA aberta por continuidade de tendência");
-               }
-            }
-            else if(EnableDebugLogs)
-            {
-               Print("Sinal de tendência detectado, mas fora do horário comercial");
-            }
-         }
+         nivelMartingale++;
+         if(nivelMartingale > MaxMartingale)
+            nivelMartingale = MaxMartingale;
+         if(EnableDebugLogs)
+            Print("Martingale ativado. Novo nível: ", nivelMartingale, " | Novo lote: ", Lots * MathPow(MultiplicadorMartingale, nivelMartingale));
       }
-   }
-   
-   if(tradingHabilitado && ordemAberta == 0 && sinalAtual != 0)
-   {
-      if(DentroDoHorario())
+      // Se último lucro foi positivo, reseta martingale
+      else if(ultimoLucro >= 0)
       {
-         if(sinalAtual == 1) 
-         {
-            if(AbrirOrdemCompra() && EnableDebugLogs) 
-               Print("Nova ordem de COMPRA aberta por sinal");
-         }
-         else if(sinalAtual == -1) 
-         {
-            if(AbrirOrdemVenda() && EnableDebugLogs) 
-               Print("Nova ordem de VENDA aberta por sinal");
-         }
+         nivelMartingale = 0;
+         if(EnableDebugLogs)
+            Print("Martingale resetado após lucro.");
       }
-      else if(EnableDebugLogs)
-      {
-         Print("Sinal recebido, mas fora do horário comercial");
-      }
+      ultimoFechamentoTime = 0; // Evita repetir ajuste
    }
 }
+
+
+
+
+
+
+//+------------------------------------------------------------------+
+//| Função de finalização (opcional)                                |
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
